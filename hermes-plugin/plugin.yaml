@@ -1,0 +1,3 @@
+name: herdr-hermes-state
+version: "0.1"
+description: Report Hermes turn state (working / idle / blocked on a question) to the Herdr pane it runs in
