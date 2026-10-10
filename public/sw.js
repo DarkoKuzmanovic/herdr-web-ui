@@ -205,12 +205,20 @@ self.addEventListener("push", (event) => {
     (async () => {
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       const watching = windows.some((client) => client.visibilityState === "visible");
+      const answers = payload.prompt ? payload.prompt.answers : [];
       await self.registration.showNotification(payload.title || "herdr", {
         body: payload.body || "",
         tag: payload.tag || "herdr",
         renotify: !watching,
         silent: watching,
-        data: { pane_id: payload.pane_id || null, machine_id: payload.machine_id || "local", workspace_id: payload.workspace_id || null },
+        // a question's choices, answered from the notification (server/push.ts withPrompt)
+        actions: answers.map((answer, index) => ({ action: String(index), title: answer.label })),
+        data: {
+          pane_id: payload.pane_id || null,
+          machine_id: payload.machine_id || "local",
+          workspace_id: payload.workspace_id || null,
+          ...(payload.prompt ? { prompt_id: payload.prompt.id, answers } : {}),
+        },
         icon: "/icons/icon-192.png?v=ram1",
         // Android's status bar and small icon: white on transparent, or Chrome's bell
         badge: "/icons/badge-96.png?v=ram1",
@@ -241,6 +249,31 @@ function isAppWindow(url) {
 let latestNotificationClick = 0;
 let latestNotificationSelection = null;
 self.addEventListener("notificationclick", (event) => {
+  const data = event.notification.data || {};
+  const answer = event.action && data.prompt_id ? (data.answers || [])[Number(event.action)] : null;
+  if (answer) {
+    event.notification.close();
+    // the same answer the card sends: refused (409) when the question on screen is no longer this one
+    event.waitUntil(
+      (async () => {
+        const response = await fetch("/api/pane/prompt/answer", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pane_id: data.pane_id, prompt_id: data.prompt_id, option_index: answer.option_index }),
+        }).catch(() => null);
+        if (response && response.ok) return;
+        // never answered twice: the tap says so, and a tap on that opens the pane
+        await self.registration.showNotification(event.notification.title, {
+          body: "Not answered: the question changed or the PC did not answer. Tap to open.",
+          tag: event.notification.tag,
+          data: { pane_id: data.pane_id, machine_id: data.machine_id },
+          icon: "/icons/icon-192.png?v=ram1",
+          badge: "/icons/badge-96.png?v=ram1",
+        });
+      })(),
+    );
+    return;
+  }
   const click = ++latestNotificationClick;
   event.notification.close();
   const paneId = event.notification.data ? event.notification.data.pane_id : null;

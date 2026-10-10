@@ -37,7 +37,7 @@ import { dirname, join } from "node:path";
 import webpush from "web-push";
 
 import { paneStorageId } from "../shared/machines.ts";
-import type { AgentStatus, HerdrPane, PushPayload } from "../shared/protocol.ts";
+import type { AgentStatus, HerdrPane, InteractivePrompt, PushPayload } from "../shared/protocol.ts";
 import {
   type AlertPrefs,
   DEFAULT_ALERTS,
@@ -116,6 +116,8 @@ export interface PushServiceOptions {
   subject?: string;
   /** Current title of a pane, looked up when an alert fires; falls back to the last seeded one. */
   lookupTitle?: (paneId: string) => Promise<string | undefined>;
+  /** The card a blocked local pane shows when its alert fires, for the alert's text and buttons. */
+  lookupPrompt?: (paneId: string) => Promise<InteractivePrompt | null>;
   timing?: Partial<AlertTiming>;
   now?: () => number;
   canDeliver?: (deviceId: string | null | undefined) => boolean;
@@ -175,6 +177,25 @@ export function parseSubscription(value: unknown, options: { loopbackHttp?: bool
 
 export function statusMessage(paneId: string, title: string, status: AgentStatus): PushPayload {
   return { pane_id: paneId, title, body: statusNotificationBody(status), tag: paneNotificationTag(paneId) };
+}
+
+/** Phones show two notification buttons (Chrome's Notification.maxActions): a card with more choices only says its question. */
+const MAX_ANSWERS = 2;
+
+/**
+ * A blocked alert that says the pane's question, and offers its choices as buttons when there
+ * are at most two. Only a plain question gets buttons: an approval runs a command, which nobody
+ * should allow from a lock screen without seeing it, and a multi-select or unknown menu
+ * needs more than one tap.
+ */
+export function withPrompt(message: PushPayload, card: InteractivePrompt | null): PushPayload {
+  // a card no reader knows shows the agent's status line, which is no question
+  if (!card || card.fallback) return message;
+  const question = card.question.trim();
+  const body = question ? (question.length > 200 ? `${question.slice(0, 199)}…` : question) : message.body;
+  const choices = card.options.flatMap((option, index) => index === card.custom_option_index ? [] : [{ label: option.label.slice(0, 40), option_index: index }]);
+  const answerable = card.kind === "question" && !card.multi_select && choices.length > 0 && choices.length <= MAX_ANSWERS;
+  return { ...message, body, ...(answerable ? { prompt: { id: card.id, answers: choices } } : {}) };
 }
 
 export function endedMessage(paneId: string, title: string): PushPayload {
@@ -474,7 +495,9 @@ export function createPushService(options: PushServiceOptions): PushService {
           const current = store().get(subscription.endpoint);
           return current && current.device_id === subscription.device_id ? [current] : [];
         });
-        await broadcast({ ...statusMessage(paneId, title, status), ...where(key, machineId), tag: paneNotificationTag(paneId, machineId) }, status === "blocked" ? "high" : "normal", live);
+        // a remote PC's screen is read through its bridge: its alerts keep the plain text
+        const card = status === "blocked" && machineId === "local" ? await options.lookupPrompt?.(paneId).catch(() => null) ?? null : null;
+        await broadcast({ ...withPrompt(statusMessage(paneId, title, status), card), ...where(key, machineId), tag: paneNotificationTag(paneId, machineId) }, status === "blocked" ? "high" : "normal", live);
       });
     },
 

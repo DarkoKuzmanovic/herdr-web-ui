@@ -1070,6 +1070,9 @@ export interface PushPayload {
   title: string;
   body: string;
   tag: string;
+  /** a local pane's question card, when the alert carries it: the body is then its question, and
+   * these are the one-tap answers the service worker posts to /api/pane/prompt/answer */
+  prompt?: { id: string; answers: Array<{ label: string; option_index: number }> };
 }
 
 /** WebSocket at /ws

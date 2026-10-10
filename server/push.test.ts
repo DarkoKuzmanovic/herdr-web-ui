@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AlertPrefs } from "../shared/notify-policy.ts";
-import type { AgentStatus, HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
+import type { AgentStatus, HerdrPane, InteractivePrompt, SessionSnapshot } from "../shared/protocol.ts";
 import { CompletionTracker } from "./completion.ts";
 import { createPushService, handlePushRequest, parseSubscription, type PushService } from "./push.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
@@ -213,6 +213,44 @@ describe("push delivery", () => {
     push.seed([pane("w1:p1", "working", "claude")]);
     await push.onStatus("w1:p1", "blocked");
     expect(fake.received).toHaveLength(1);
+  });
+
+  it("says a local pane's question, with its choices as buttons only for a plain question of at most two", async () => {
+    const card = (kind: InteractivePrompt["kind"], labels: string[], custom: number | null = null): InteractivePrompt => ({
+      id: "abc123", agent: "hermes", kind, title: "Question", question: "Pick red or blue?", body: null,
+      options: labels.map((label) => ({ label, description: null })), multi_select: false, custom_option_index: custom,
+    });
+    let shown: InteractivePrompt | null = card("question", ["red", "blue", "Other (type your answer)"], 2);
+    const asked: string[] = [];
+    const push = subscribed({ lookupPrompt: async (paneId) => { asked.push(paneId); return shown; } });
+    push.seed([pane("w1:p1", "working", "hermes")]);
+    push.seed([pane("w1:p1", "working", "far")], "pc-a", "Work PC");
+    const ask = async (machineId?: string): Promise<void> => {
+      await push.onStatus("w1:p1", "blocked", machineId);
+      await push.onStatus("w1:p1", "working", machineId);
+    };
+
+    await ask();
+    expect(fake.received.at(-1)!.payload).toMatchObject({
+      body: "Pick red or blue?",
+      prompt: { id: "abc123", answers: [{ label: "red", option_index: 0 }, { label: "blue", option_index: 1 }] },
+    });
+    // an approval runs a command: said, never allowed from the lock screen
+    shown = card("approval", ["Yes", "No"]);
+    await ask();
+    // three choices are more than a phone shows buttons for
+    shown = card("question", ["a", "b", "c"]);
+    await ask();
+    for (const received of fake.received.slice(1)) {
+      expect(received.payload.body).toBe("Pick red or blue?");
+      expect(received.payload.prompt).toBeUndefined();
+    }
+    // no card, or a remote PC: the plain alert, and a remote pane's screen is not read here
+    shown = null;
+    await ask();
+    await ask("pc-a");
+    expect(fake.received.slice(-2).map((received) => received.payload.body)).toEqual(["waiting for your input", "waiting for your input"]);
+    expect(asked).toHaveLength(4);
   });
 
   it("names the pane by its current title, falling back to the seeded one", async () => {

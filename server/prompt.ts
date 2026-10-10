@@ -3197,6 +3197,11 @@ export async function claudeHeldIsGrey(paneId: string, prompt: InteractivePrompt
     .then((read) => same(claudeGreyInput(read.text)), () => false);
 }
 
+/** The card a pane shows now, read like the chat's own poll: a blocked pane's push alert says it. */
+export async function currentPrompt(paneId: string, codexHome?: string): Promise<InteractivePrompt | null> {
+  return (await readPrompt(paneId, codexHome)).prompt;
+}
+
 async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: string; status: string; prompt: InteractivePrompt | null; pane: HerdrPane; panes: HerdrPane[] }> {
   const { panes } = await sessionSnapshot();
   // a closed pane's wait has ended too
