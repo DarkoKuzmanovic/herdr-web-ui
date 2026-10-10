@@ -208,7 +208,7 @@ export function replyLine(turns: readonly ConversationTurn[]): string | null {
   const last = turns.at(-1);
   if (last?.role !== "assistant") return null;
   const texts = last.parts.flatMap((part) => part.kind === "text" && part.phase !== "commentary" ? [part.text] : []);
-  const line = texts.at(-1)?.split(/\r?\n/).map((row) => row.replace(/^\s*(?:#{1,6}\s+|[-*+>]\s+|\d+\.\s+)/, "").replace(/[*_`]/g, "").trim()).find(Boolean);
+  const line = texts.at(-1)?.split(/\r?\n/).map((row) => row.replace(/^\s*(?:#{1,6}\s+|[-*+>]\s+|\d+\.\s+)/, "").replace(/[*`]/g, "").trim()).find(Boolean);
   if (!line) return null;
   return line.length > 160 ? `${line.slice(0, 159)}…` : line;
 }

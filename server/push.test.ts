@@ -235,6 +235,7 @@ describe("push delivery", () => {
     const answer = (...parts: ConversationTurn["parts"]): ConversationTurn => ({ role: "assistant", ts: null, parts });
     expect(replyLine([answer({ kind: "text", text: "Looking…", phase: "commentary" }, { kind: "text", text: "\n## **Done**: `bun test` passes\nmore" })])).toBe("Done: bun test passes");
     expect(replyLine([answer({ kind: "text", text: "- first bullet" })])).toBe("first bullet");
+    expect(replyLine([answer({ kind: "text", text: "Renamed `pane_id` in __init__.py" })])).toBe("Renamed pane_id in __init__.py");
     expect(replyLine([answer({ kind: "text", text: "x".repeat(300) })])!.length).toBe(160);
     expect(replyLine([answer({ kind: "thinking", text: "hm" })])).toBeNull();
     expect(replyLine([answer({ kind: "text", text: "old" }), { role: "user", ts: null, parts: [{ kind: "text", text: "next" }] }])).toBeNull();
