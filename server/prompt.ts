@@ -2368,6 +2368,8 @@ function parseHermesApproval(screen: string): ParsedPrompt | null {
   const rows = box.slice(rowAt).map((line) => approval
     ? line.match(HERMES_APPROVAL_ROW_RE)
     : line.match(/^(▸ )?()(\S.*)$/));
+  // a confirmation only under its own Y/N hint, an approval only under its numbered one
+  if (!lines[hintIndex]!.includes(approval ? " quick pick" : "Y/N quick")) return null;
   if (rows.some((row) => !row) || (!approval && (rows.length !== 2 || !/^[?⚠] /.test(heading)))) return null;
   const labels = rows.map((row) => row![3]!);
   const selectedIndex = rows.findIndex((row) => row![1]);
@@ -3604,7 +3606,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         // Claude's unnumbered rows and pi's models are read with no number to aim at: looked at
         // again before the Enter even when it needs no move. So is Claude's model list, picked
         // with a letter: typed after the list has gone, it would stand in the agent's own prompt
-        let moved = responder === "claude-confirm" || responder === "pi-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu";
+        let moved = responder === "claude-confirm" || responder === "pi-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu" || responder === "hermes-approval";
         // Claude's and Codex's model lists: a window on a list, picked with a letter; Claude's effort
         // slider the same way, its levels side by side
         const list = responder === "claude-model" || responder === "claude-effort" || responder === "codex-model";

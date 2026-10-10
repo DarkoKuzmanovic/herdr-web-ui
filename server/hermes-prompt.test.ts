@@ -98,6 +98,10 @@ describe("hermes approval and confirm", () => {
     expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
   });
 
+  it("takes a two-row box for a Yes/No only under the Y/N hint", () => {
+    expect(parseInteractivePrompt("hermes", boxed("? Something else", "▸ One", "  Two", "↑/↓ select · Enter confirm · 1-2 quick pick · Esc/Ctrl+C deny"))).toBeNull();
+  });
+
   it("drops a box that has been answered and scrolled on", () => {
     const answered = boxed("⚠ Clear the current session?", "▸ No, keep going", "  Yes, clear the session", "↑/↓ select · Enter confirm · Y/N quick · Esc cancel");
     expect(parseInteractivePrompt("hermes", `${answered}\n${"later output\n".repeat(8)} ❯`)).toBeNull();
