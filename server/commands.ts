@@ -13,6 +13,11 @@ const BUILTINS: Record<string, readonly string[]> = {
   // idle while the terminal waits for arrow keys. Offering the one command that opens it from the
   // chat would walk a reader into a state only the terminal lens can leave. Navigating stays in the
   // terminal; the chat's place is the abandoned-turns marker, which says where a /tree left off
+  // Hermes Agent, from its own command registry (hermes_cli/commands.py), less what its TUI only
+  // opens as a full-screen picker (/sessions, /agents, /skills, /plugins, /palette), what acts on
+  // the PC's own clipboard, editor or microphone (/copy, /paste, /prompt, /voice), and what is no
+  // job for a phone (/update, /skin and the other display toggles)
+  hermes: ["new", "clear", "retry", "undo", "title", "compress", "rollback", "stop", "bg", "btw", "queue", "steer", "goal", "subgoal", "refine", "review", "plan", "status", "context", "diff", "model", "reasoning", "fast", "yolo", "approvals", "busy", "personality", "usage", "insights", "tools", "toolsets", "memory", "cron", "kanban", "reload", "reload-mcp", "reload-skills", "help", "version", "quit", "history", "worktree", "loop", "moa", "learn", "init", "focus", "verbose"],
   pi: ["settings", "model", "thinking", "scoped-models", "login", "logout", "llama", "new", "resume", "name", "session", "fork", "clone", "compact", "import", "copy", "export", "share", "bug", "trust", "reload", "hotkeys", "changelog", "quit"],
 };
 
@@ -29,6 +34,45 @@ const PI_DESCRIPTIONS: Record<string, string> = {
   bug: "<description> — Report a bug to the Pi developers", trust: "Save project trust decision for future sessions",
   reload: "Reload keybindings, extensions, skills, prompts, themes, and context files", hotkeys: "Show all keyboard shortcuts",
   changelog: "Show changelog entries", quit: "Quit pi",
+};
+
+/** Hermes's own descriptions, with its argument hint in front, as pi's are. */
+const HERMES_DESCRIPTIONS: Record<string, string> = {
+  new: "[name] — Start a new session (fresh session ID + history)", clear: "Clear screen and start a new session",
+  retry: "Retry the last message (resend to agent)", undo: "[N] — Back up N user turns and re-prompt (default 1)",
+  title: "[name] — Set a title for the current session",
+  compress: "[here [N] | focus topic | --preview] — Compress conversation context",
+  rollback: "[number] [--all] — List or restore filesystem checkpoints", stop: "Kill all running background processes",
+  bg: "<prompt> — Run a prompt in a separate background session",
+  btw: "<question> — Ask a side question about the current conversation without interrupting it",
+  queue: "[<prompt>|list|edit N <prompt>|rm N|move A B|clear] — Queue a prompt for the next turn",
+  steer: "<prompt> — Inject a message after the next tool call without interrupting",
+  goal: "[text | show | pause | resume | clear | status] — Set a standing goal Hermes works on across turns until achieved",
+  subgoal: "[text | remove N | clear] — Add or manage extra criteria on the active goal",
+  refine: "[focus instructions] — Review this conversation now and save lessons to memory/skills",
+  review: "[review instructions] — Spawn an independent subagent to review the work just discussed",
+  plan: "[task] — Write a markdown implementation plan to .hermes/plans/ without executing anything",
+  status: "Show session, model, token, and context info", context: "[all] — Show detailed context window usage",
+  diff: "[staged|all|session] [--stat] [path...] — Show git changes in the working directory",
+  // bare, Hermes opens its model picker, which only the terminal can drive
+  model: "<model> [--provider name] [--reasoning level] [--global] — Switch model (name one: bare /model opens a picker)",
+  reasoning: "[level|show|hide|full|clamp] [--global] — Manage reasoning effort and display",
+  fast: "[normal|fast|auto|cold|status] [--global] — Fast mode", yolo: "Toggle YOLO mode (skip all dangerous command approvals)",
+  approvals: "[manual|smart|off] — Show or set the persistent dangerous-command approval mode",
+  busy: "[queue|steer|interrupt|status] — Control how messages behave while Hermes is working",
+  personality: "[name] — Set a predefined personality", usage: "Show token usage and rate limits",
+  insights: "[days] — Show usage insights and analytics", tools: "[list|disable|enable] [name...] — Manage tools",
+  toolsets: "List available toolsets", memory: "[pending|approve|reject|approval] [id|on|off] — Review pending memory writes",
+  cron: "[subcommand] — Manage scheduled tasks", kanban: "[subcommand] — Multi-profile collaboration board",
+  reload: "Reload .env variables into the running session", "reload-mcp": "Reload MCP servers from config",
+  "reload-skills": "Re-scan ~/.hermes/skills/ for newly installed or removed skills",
+  help: "[skills|<filter>] — Show available commands", version: "Show Hermes Agent version",
+  quit: "[--delete] — Exit the CLI (use --delete to also remove session history)", history: "Show conversation history",
+  worktree: "[new [name]|list|prune] — Show, list, create, or prune isolated git worktrees",
+  loop: "[interval] <prompt> [--times N] [--until <condition>] — Re-run a prompt on a recurring interval",
+  moa: "<prompt> — Run one prompt through the default Mixture of Agents preset", learn: "<what to learn from> — Learn a reusable skill",
+  init: "[notes] — Generate or update AGENTS.md project instructions from a repo scan",
+  focus: "[on|off|status] — Show only your prompt and the final response", verbose: "Cycle tool progress display: off -> new -> all -> verbose",
 };
 
 const DESCRIPTIONS: Record<string, string> = {
@@ -157,7 +201,7 @@ function piTemplates(root: string, source: SlashCommand["source"]): SlashCommand
 
 export function paneCommands(agent: string | null | undefined, cwd: string | null | undefined, home = process.env.HOME ?? ""): SlashCommand[] {
   if (!agent || !(agent in BUILTINS)) return [];
-  const commands: SlashCommand[] = (BUILTINS[agent] ?? []).map((name) => ({ name, description: (agent === "pi" ? PI_DESCRIPTIONS[name] : undefined) ?? DESCRIPTIONS[name] ?? `Run /${name}`, source: "builtin" }));
+  const commands: SlashCommand[] = (BUILTINS[agent] ?? []).map((name) => ({ name, description: (agent === "pi" ? PI_DESCRIPTIONS[name] : agent === "hermes" ? HERMES_DESCRIPTIONS[name] : undefined) ?? DESCRIPTIONS[name] ?? `Run /${name}`, source: "builtin" }));
   if (agent === "claude") {
     commands.push(...customCommands(join(home, ".claude", "commands"), "user"));
     if (cwd) commands.push(...customCommands(join(cwd, ".claude", "commands"), "project"));

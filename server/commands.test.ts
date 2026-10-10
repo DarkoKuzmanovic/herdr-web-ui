@@ -25,6 +25,16 @@ describe("paneCommands", () => {
     expect(paneCommands(null, "/tmp")).toEqual([]);
   });
 
+  it("offers Hermes's commands in its words, and none that only opens a terminal picker", () => {
+    const hermes = paneCommands("hermes", null, temp("commands-home-"));
+    expect(hermes.find((command) => command.name === "steer")?.description).toBe("<prompt> — Inject a message after the next tool call without interrupting");
+    expect(hermes.find((command) => command.name === "model")?.description).toContain("bare /model opens a picker");
+    for (const picker of ["sessions", "agents", "skills", "plugins", "palette", "paste", "prompt"]) {
+      expect(hermes.some((command) => command.name === picker)).toBeFalse();
+    }
+    expect(hermes.every((command) => command.source === "builtin" && !command.description.startsWith("Run /"))).toBeTrue();
+  });
+
   it("offers Claude's /goal with the argument it takes", () => {
     const goal = paneCommands("claude", null, temp("commands-home-")).find((command) => command.name === "goal");
     expect(goal?.source).toBe("builtin");
