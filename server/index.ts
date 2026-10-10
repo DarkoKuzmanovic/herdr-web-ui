@@ -32,6 +32,7 @@ import { ClaudeSubagentStatus, claudeSubagents, within } from "./claude-subagent
 import { BackgroundWait } from "./background-wait.ts";
 import { SessionPlans } from "./session-plan.ts";
 import { codexOpenRollout, paneCodexHome } from "./codex.ts";
+import { HermesDelegations } from "./hermes-delegations.ts";
 import { CompletionTracker, type OmoRest } from "./completion.ts";
 import { freeAgentName } from "./agent-name.ts";
 import { launchedAgents } from "./launched-agents.ts";
@@ -1173,9 +1174,14 @@ export function createServer(
     void claudeAgents.refresh(named.panes).catch(() => undefined).then(() => plans.refresh(named.panes)).catch(() => undefined);
     // an agent this server started has had no turn yet: its start screen is no work (launched-agents.ts)
     for (const pane of named.panes) pane.agent_status = launchedAgents.settle(pane.pane_id, pane.agent_status);
+    hermesAgents.refresh(named.panes);
     return named;
   };
-  const backgroundOf = (paneId: string): number => omo.backgroundOf(paneId) || claudeAgents.countOf(paneId);
+  /** Hermes panes count the subagents they run in the background, read from Hermes's own state.db (server/hermes-delegations.ts) */
+  const hermesAgents = new HermesDelegations({
+    onChange: (paneId, running, since) => claudeAgentsChanged(paneId, running, running, since),
+  });
+  const backgroundOf = (paneId: string): number => omo.backgroundOf(paneId) || claudeAgents.countOf(paneId) || hermesAgents.countOf(paneId);
   /** the snapshot clients get: finishes settled, OmO panes named, background tasks, waits and plan progress */
   const clientSnapshot = async (): Promise<SessionSnapshot> => {
     const snapshot = await completions.readSnapshot(rawSnapshot);
@@ -1754,12 +1760,14 @@ export function createServer(
       // the pane is still taken for the status before (work that ended before the turn did holds
       // nothing), and this frame says all of it, so none says the pane finished first
       const claude = agent === "claude" && !omo.runs(paneId);
-      if (claude) {
+      // a Hermes turn holds on its async subagents the same way
+      const hermes = agent === "hermes";
+      if (claude || hermes) {
         settling = paneId;
-        try { claudeAgents.poll(paneId); } finally { settling = null; }
+        try { if (claude) claudeAgents.poll(paneId); else hermesAgents.poll(paneId); } finally { settling = null; }
         waits.status(paneId, status);
       } else waits.forget(paneId);
-      broadcastAll(paneStatus(paneId, status, claude ? { background_tasks: claudeAgents.countOf(paneId) } : {}));
+      broadcastAll(paneStatus(paneId, status, claude || hermes ? { background_tasks: backgroundOf(paneId) } : {}));
       push.onStatus(paneId, alertStatus(status, waits.waiting(paneId))).catch(logPushError);
     },
     // a finish reported as done, now in front at herdr's terminal: seen, idle again
@@ -1773,7 +1781,7 @@ export function createServer(
     },
     onBaseline: (panes) => {
       // A resting baseline never reholds old work after a bridge restart.
-      for (const pane of panes) if (pane.agent === "claude") waits.seed(pane.pane_id, pane.agent_status);
+      for (const pane of panes) if (pane.agent === "claude" || pane.agent === "hermes") waits.seed(pane.pane_id, pane.agent_status);
       push.seed(panes.map((pane) => ({ ...pane, agent_status: alertStatus(pane.agent_status, waits.waiting(pane.pane_id)) })));
       for (const pane of panes) {
         // A fast mirrored client may queue before the collector's first baseline. A
@@ -1792,7 +1800,7 @@ export function createServer(
       completions.resync(panes, newer);
       const settled = (pane: HerdrPane): AgentStatus => completions.current(pane.pane_id) ?? pane.agent_status;
       for (const pane of panes) { pending.status(pane.pane_id, settled(pane)); drainPending(pane.pane_id); }
-      for (const pane of panes) if (!newer.has(pane.pane_id) && pane.agent === "claude") waits.status(pane.pane_id, settled(pane));
+      for (const pane of panes) if (!newer.has(pane.pane_id) && (pane.agent === "claude" || pane.agent === "hermes")) waits.status(pane.pane_id, settled(pane));
       push.resync(panes.map((pane) => ({ ...pane, agent_status: alertStatus(settled(pane), waits.waiting(pane.pane_id)) })), newer);
     },
     onPaneEnded: (paneId) => {
@@ -1811,6 +1819,7 @@ export function createServer(
   omo.start();
   gjc.start();
   claudeAgents.start();
+  hermesAgents.start();
   const waitTimer = setInterval(waitsRanOut, 1000);
   waitTimer.unref?.();
   plans.start();
@@ -3624,6 +3633,7 @@ export function createServer(
       omo.stop();
       gjc.stop();
       claudeAgents.stop();
+      hermesAgents.stop();
       clearInterval(waitTimer);
       plans.stop();
       machines?.stop();
