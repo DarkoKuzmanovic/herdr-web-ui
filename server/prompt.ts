@@ -122,6 +122,7 @@ type Responder =
   | "pi-model"
   | "hermes-question"
   | "hermes-input"
+  | "hermes-approval"
   | "fallback-menu"
   | "fallback-gjc-menu"
   | "fallback-keys";
@@ -1932,6 +1933,7 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
+  if (prompt.responder === "hermes-approval") return shown.slice(-6).some((line) => HERMES_BOX_HINT_RE.test(boxLine(line)));
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
   if (prompt.responder === "codex-question") return ends(CODEX_ASK_HINT_RE);
   if (prompt.responder === "codex-async-question") return cleanLines.slice(-4).some((line) => CODEX_ASYNC_ASK_HINT_RE.test(line)) || ends(CODEX_ASYNC_ASK_HINT_RE);
@@ -2329,6 +2331,59 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
   });
 }
 
+/**
+ * Hermes's approval of a dangerous command and its own Yes/No confirmation, as its Ink TUI draws
+ * them in a double box (ui-tui/src/components/prompts.tsx):
+ *
+ *   ║ ⚠ approval required · recursive delete            ║   ║ ⚠ Delete this session?  ║
+ *   ║  rm -rf build                                      ║   ║  It cannot be undone    ║
+ *   ║ ▸ 1. Allow once                                    ║   ║                         ║
+ *   ║   2. Allow this session                            ║   ║ ▸ No                    ║
+ *   ║   3. Always allow                                  ║   ║   Yes                   ║
+ *   ║   4. Deny                                          ║   ║ ↑/↓ select · Enter      ║
+ *   ║ ↑/↓ select · Enter confirm · 1-4 quick pick · …   ║   ║   confirm · Y/N quick … ║
+ *
+ * Answered with the arrows and Enter, as every card is: never the digit or Y/N quick keys.
+ */
+const HERMES_BOX_HINT_RE = /^↑\/↓ select · Enter confirm · (?:1-\d quick pick|Y\/N quick)/;
+const HERMES_APPROVAL_RE = /^⚠ approval required · (.+)$/;
+const HERMES_APPROVAL_ROW_RE = /^(▸ )?(\d)\. (Allow once|Allow this session|Always allow|Deny)$/;
+
+function boxLine(line: string): string {
+  return line.replace(ANSI_RE, "").trim().replace(/^║/, "").replace(/║$/, "").trim();
+}
+
+function parseHermesApproval(screen: string): ParsedPrompt | null {
+  const lines = screen.split(/\r?\n/).map(boxLine);
+  const hintIndex = findLastIndex(lines, (line) => HERMES_BOX_HINT_RE.test(line));
+  if (hintIndex < 0) return null;
+  const top = findLastIndex(lines.slice(0, hintIndex), (line) => line.startsWith("╔"));
+  if (top < 0) return null;
+  const box = lines.slice(top + 1, hintIndex).filter(Boolean);
+  const heading = box[0] ?? "";
+  const approval = heading.match(HERMES_APPROVAL_RE);
+  // the rows: numbered for an approval, the last two lines (cancel, then confirm) for a confirmation
+  const rowAt = approval ? box.findIndex((line) => HERMES_APPROVAL_ROW_RE.test(line)) : box.length - 2;
+  if (rowAt < 1) return null;
+  const rows = box.slice(rowAt).map((line) => approval
+    ? line.match(HERMES_APPROVAL_ROW_RE)
+    : line.match(/^(▸ )?()(\S.*)$/));
+  if (rows.some((row) => !row) || (!approval && (rows.length !== 2 || !/^[?⚠] /.test(heading)))) return null;
+  const labels = rows.map((row) => row![3]!);
+  const selectedIndex = rows.findIndex((row) => row![1]);
+  if (selectedIndex < 0 || rows.filter((row) => row![1]).length !== 1) return null;
+  if (approval && rows.some((row, index) => Number(row![2]) !== index + 1)) return null;
+  const detail = box.slice(1, rowAt).join("\n") || null;
+  const question = approval ? `Run this command? (${approval[1]})` : heading.slice(2);
+  return finishPrompt("hermes", {
+    kind: "approval", title: approval ? "Approval required" : "Confirm", question, body: detail,
+    options: labels.map((label) => ({ label, description: null })), multi_select: false, custom_option_index: null,
+  }, {
+    responder: "hermes-approval", menuLabels: labels, selectedIndex, checkedOptionIndices: [], customMenuIndex: null,
+    rejectWithEscapeIndex: null,
+  });
+}
+
 function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null, omoTrusted = true, omoOpen: OmoAsk[] = [], sent: string | null = null, working = false): ParsedPrompt | null {
   const omo = () => {
     const forms = (ask: OmoAsk | null, trusted: boolean) => [parseOmoQuestion(screen, ask, trusted), parseOmoTyping(screen, ask, trusted), parseOmoReview(screen, ask, trusted)];
@@ -2348,7 +2403,7 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
         : agent === "pi"
           ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
-          ? [parseHermesClarify(screen)]
+          ? [parseHermesClarify(screen), parseHermesApproval(screen)]
         : agent === "omo" || agent === ""
           ? omo()
           : [];

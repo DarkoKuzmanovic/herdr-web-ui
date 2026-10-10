@@ -4065,6 +4065,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
         name: "Hermes's multi-select question: Red and Blue", agent: "hermes", rows: 4, choice: { option_indices: [0, 1] }, sent: ["space", "down", "space", "enter"],
         draw: (at, ticked) => `\n ask 1 question\n ▸ Pick colours\n${["Red", "Blue", "Green"].map((row, index) => `   ${at === index ? "▸" : " "} ${ticked.includes(index) ? "[x]" : "[ ]"} ${index + 1}. ${row}`).join("\n")}\n   ${at === 3 ? "▸" : " "} 4. Other (type your answer)\n 0/1 answered · Space toggle · ↑/↓ select · Enter confirm and continue · Tab/Shift+Tab switch question · Esc/Ctrl+C cancel\n ─ (⌐■_■) deliberating…  · 10s │ opus 5.5\n`,
       },
+      {
+        name: "Hermes's command approval: Deny", agent: "hermes", rows: 4, choice: { option_index: 3 }, sent: ["down", "down", "down", "enter"],
+        draw: (at) => `\n ╔═══╗\n ║ ⚠ approval required · recursive delete ║\n ║  rm -rf junk ║\n${["Allow once", "Allow this session", "Always allow", "Deny"].map((row, index) => ` ║ ${at === index ? "▸" : " "} ${index + 1}. ${row} ║`).join("\n")}\n ║ ↑/↓ select · Enter confirm · 1-4 quick pick · Esc/Ctrl+C deny ║\n ╚═══╝\n ─ ready │ opus 5.5\n`,
+      },
     ];
     for (const { name, agent, status = "blocked", rows, start = 0, draw, choice, sent } of cases) {
       test(name, async () => {

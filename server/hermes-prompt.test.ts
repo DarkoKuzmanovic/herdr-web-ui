@@ -62,3 +62,44 @@ describe("hermes clarify", () => {
     expect(answerKeys(parseInteractivePrompt("hermes", onOther)!, { option_indices: [1] })).toEqual([{ keys: ["up"] }, { keys: ["enter"] }]);
   });
 });
+
+// the double box Hermes draws an approval and its own Yes/No in, read off a live pane
+const boxed = (...rows: string[]) => [" ╔" + "═".repeat(60) + "╗", ...rows.map((row) => ` ║ ${row.padEnd(58)} ║`), " ╚" + "═".repeat(60) + "╝", "", STATUS].join("\n");
+
+describe("hermes approval and confirm", () => {
+  it("reads a dangerous command's approval and answers it by moving the cursor, never by a digit", () => {
+    const prompt = parseInteractivePrompt("hermes", boxed(
+      "⚠ approval required · recursive delete",
+      " rm -rf /tmp/hx/junk",
+      "▸ 1. Allow once",
+      "  2. Allow this session",
+      "  3. Always allow",
+      "  4. Deny",
+      "↑/↓ select · Enter confirm · 1-4 quick pick · Esc/Ctrl+C deny",
+    ))!;
+    expect(prompt.kind).toBe("approval");
+    expect(prompt.question).toBe("Run this command? (recursive delete)");
+    expect(prompt.body).toBe("rm -rf /tmp/hx/junk");
+    expect(prompt.options.map((option) => option.label)).toEqual(["Allow once", "Allow this session", "Always allow", "Deny"]);
+    expect(answerKeys(prompt, { option_index: 3 })).toEqual([{ keys: ["down"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  it("reads its own Yes/No, the cancel row first", () => {
+    const prompt = parseInteractivePrompt("hermes", boxed(
+      "⚠ Clear the current session?",
+      " This ends the current conversation and clears the transcript.",
+      "",
+      "▸ No, keep going",
+      "  Yes, clear the session",
+      "↑/↓ select · Enter confirm · Y/N quick · Esc cancel",
+    ))!;
+    expect([prompt.question, prompt.body]).toEqual(["Clear the current session?", "This ends the current conversation and clears the transcript."]);
+    expect(prompt.options.map((option) => option.label)).toEqual(["No, keep going", "Yes, clear the session"]);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  it("drops a box that has been answered and scrolled on", () => {
+    const answered = boxed("⚠ Clear the current session?", "▸ No, keep going", "  Yes, clear the session", "↑/↓ select · Enter confirm · Y/N quick · Esc cancel");
+    expect(parseInteractivePrompt("hermes", `${answered}\n${"later output\n".repeat(8)} ❯`)).toBeNull();
+  });
+});
