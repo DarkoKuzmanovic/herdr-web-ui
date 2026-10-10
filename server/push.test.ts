@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AlertPrefs } from "../shared/notify-policy.ts";
-import type { AgentStatus, HerdrPane, InteractivePrompt, SessionSnapshot } from "../shared/protocol.ts";
+import type { AgentStatus, ConversationTurn, HerdrPane, InteractivePrompt, SessionSnapshot } from "../shared/protocol.ts";
 import { CompletionTracker } from "./completion.ts";
-import { createPushService, handlePushRequest, parseSubscription, type PushService } from "./push.ts";
+import { createPushService, handlePushRequest, parseSubscription, replyLine, type PushService } from "./push.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 
 /**
@@ -213,6 +213,32 @@ describe("push delivery", () => {
     push.seed([pane("w1:p1", "working", "claude")]);
     await push.onStatus("w1:p1", "blocked");
     expect(fake.received).toHaveLength(1);
+  });
+
+  it("says the first line of a local pane's last answer in its finish alert", async () => {
+    let reply: string | null = "Fixed the build: 3 files changed";
+    const asked: string[] = [];
+    const push = subscribed({ lookupReply: async (paneId) => { asked.push(paneId); return reply; } });
+    push.seed([pane("w1:p1", "working", "codex")]);
+    push.seed([pane("w1:p1", "working", "far")], "pc-a", "Work PC");
+    await push.onStatus("w1:p1", "done");
+    reply = null;
+    await push.onStatus("w1:p1", "working");
+    await push.onStatus("w1:p1", "done");
+    await push.onStatus("w1:p1", "done", "pc-a");
+    expect(fake.received.map((received) => received.payload.body)).toEqual(["work finished: Fixed the build: 3 files changed", "work finished", "work finished"]);
+    // a question's alert and a remote PC's never read the transcript for it
+    expect(asked).toEqual(["w1:p1", "w1:p1"]);
+  });
+
+  it("reads the line from the last answer's final text, not its commentary or a user turn", () => {
+    const answer = (...parts: ConversationTurn["parts"]): ConversationTurn => ({ role: "assistant", ts: null, parts });
+    expect(replyLine([answer({ kind: "text", text: "Looking…", phase: "commentary" }, { kind: "text", text: "\n## **Done**: `bun test` passes\nmore" })])).toBe("Done: bun test passes");
+    expect(replyLine([answer({ kind: "text", text: "- first bullet" })])).toBe("first bullet");
+    expect(replyLine([answer({ kind: "text", text: "x".repeat(300) })])!.length).toBe(160);
+    expect(replyLine([answer({ kind: "thinking", text: "hm" })])).toBeNull();
+    expect(replyLine([answer({ kind: "text", text: "old" }), { role: "user", ts: null, parts: [{ kind: "text", text: "next" }] }])).toBeNull();
+    expect(replyLine([])).toBeNull();
   });
 
   it("says a local pane's question, with its choices as buttons only for a plain question of at most two", async () => {
