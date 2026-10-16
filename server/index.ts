@@ -1174,7 +1174,7 @@ export function createServer(
     const named = gjc.apply(omo.apply(snapshot));
     // not waited for: finding a transcript costs process calls, and a snapshot must not wait on them.
     // The plans come after: a Claude pane's transcript is the one the subagent tracker found
-    void claudeAgents.refresh(named.panes).catch(() => undefined).then(() => plans.refresh(named.panes)).catch(() => undefined);
+    void Promise.all([claudeAgents.refresh(named.panes), hermesPlans.refresh(named.panes)]).catch(() => undefined).then(() => plans.refresh(named.panes)).catch(() => undefined);
     // an agent this server started has had no turn yet: its start screen is no work (launched-agents.ts)
     for (const pane of named.panes) pane.agent_status = launchedAgents.settle(pane.pane_id, pane.agent_status);
     hermesAgents.refresh(named.panes);
@@ -2550,6 +2550,7 @@ export function createServer(
             const pane = seen.pane = (await sessionSnapshot()).panes.find((candidate) => candidate.pane_id === paneId);
             if (pane === undefined || plans.known(pane)) return;
             if (pane.agent === "claude") await claudeAgents.ensure(pane);
+            if (pane.agent === "hermes") await hermesPlans.ensure(pane);
             await plans.ensure(pane, true);
           })());
         }

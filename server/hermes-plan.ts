@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import type { HerdrPane, PlanStep } from "../shared/protocol.ts";
 import { remember } from "./claude-subagents.ts";
 import { hermesSessionId } from "./hermes-delegations.ts";
-import { hermesDbPath } from "./hermes.ts";
+import { hermesTranscriptForPane } from "./hermes.ts";
 
 export interface HermesPlanRow {
   role: string;
@@ -113,35 +113,75 @@ export function parseHermesPlan(rows: readonly HermesPlanRow[]): PlanStep[] | nu
   return todos?.flatMap((item): PlanStep[] => item.status === "cancelled" ? [] : [{ id: item.id, label: item.content, status: item.status as PlanStep["status"], active: null, blocked_by: [], owner: null, started_at: null, ended_at: null }]) ?? null;
 }
 
-/** No open handles between polls; only this session's todo results are checked for changes. */
+/** No open handles between polls; store discovery never blocks the synchronous reader. */
 export class HermesPlans {
   private readonly cache = new Map<string, { signature: string; steps: PlanStep[] | null }>();
+  private readonly panes = new Map<string, { session: string; path: string | null; at: number }>();
 
-  constructor(private readonly deps: { path?: () => string } = {}) {}
+  constructor(private readonly deps: { path?: (pane: HerdrPane) => string | Promise<string> } = {}) {}
+
+  async refresh(panes: readonly HerdrPane[]): Promise<void> {
+    const wanted = new Set(panes.filter((pane) => pane.agent === "hermes" && hermesSessionId(pane)).map((pane) => pane.pane_id));
+    for (const id of this.panes.keys()) if (!wanted.has(id)) this.panes.delete(id);
+    await Promise.all(panes.map((pane) => this.ensure(pane)));
+  }
+
+  async ensure(pane: HerdrPane): Promise<void> {
+    const session = pane.agent === "hermes" ? hermesSessionId(pane) : null;
+    if (!session) { this.panes.delete(pane.pane_id); return; }
+    const known = this.panes.get(pane.pane_id);
+    if (known?.session === session && Date.now() - known.at < 30_000) return;
+    const entry = { session, path: null as string | null, at: Date.now() };
+    this.panes.set(pane.pane_id, entry);
+    try {
+      const path = this.deps.path ? await this.deps.path(pane) : (await hermesTranscriptForPane(pane, pane.cwd ?? "")).dbPath;
+      if (this.panes.get(pane.pane_id) === entry) entry.path = path;
+    } catch { /* unavailable stores are retried on the next discovery interval */ }
+  }
 
   read(pane: HerdrPane): PlanStep[] | null {
     const session = pane.agent === "hermes" ? hermesSessionId(pane) : null;
-    if (!session) return null;
-    const path = (this.deps.path ?? hermesDbPath)();
+    const store = this.panes.get(pane.pane_id);
+    if (!session || store?.session !== session || !store.path) return null;
+    const path = store.path;
     let db: Database;
     try { db = new Database(path, { readonly: true, create: false }); } catch { return null; }
     try {
       db.exec("PRAGMA busy_timeout = 250");
-      const results: HermesPlanRow[] = [];
-      const newest = db.query<HermesPlanRow, [string]>(`SELECT role, tool_name, content, tool_call_id, tool_calls, active, compacted FROM messages
-        WHERE session_id = ? AND role = 'tool' AND tool_name IN ('todo', 'todo_list') AND (active = 1 OR compacted = 1) ORDER BY id DESC`);
-      for (const row of newest.iterate(session)) {
-        results.push(row);
-        if (fullTodos(object(parse(row.content))) !== null) break; // earlier snapshots cannot affect this plan
-      }
-      results.reverse();
-      // Compare the results themselves: rewinds and compaction can change old rows without a new id.
-      const signature = JSON.stringify(results);
+      const signature = JSON.stringify(db.query(`SELECT count(*) AS count, max(id) AS newest, sum(active) AS active, sum(compacted) AS compacted FROM messages
+        WHERE session_id = ? AND role = 'tool' AND tool_name IN ('todo', 'todo_list') AND (active = 1 OR compacted = 1)`).get(session));
       const key = `${path}\0${session}`;
       const cached = this.cache.get(key);
       if (cached?.signature === signature) return cached.steps;
-      const calls = results.some((row) => row.content?.startsWith("[")) ? db.query<HermesPlanRow, [string]>(`SELECT role, tool_name, NULL AS content, tool_call_id, tool_calls, active, compacted FROM messages
-        WHERE session_id = ? AND role = 'assistant' AND tool_calls LIKE '%todo%' AND (active = 1 OR compacted = 1) ORDER BY id`).all(session) : [];
+      const results: HermesPlanRow[] = [];
+      // shortcut: at most 200 results and 1 MiB of results/calls per change, upgrade if real plans exceed this window.
+      let left = 1024 * 1024;
+      const newest = db.query<HermesPlanRow & { bytes: number }, [number, string]>(`SELECT role, tool_name,
+        CASE WHEN length(CAST(content AS BLOB)) <= ? THEN content END AS content,
+        length(CAST(content AS BLOB)) AS bytes, tool_call_id, NULL AS tool_calls, active, compacted FROM messages
+        WHERE session_id = ? AND role = 'tool' AND tool_name IN ('todo', 'todo_list') AND (active = 1 OR compacted = 1) ORDER BY id DESC LIMIT 200`);
+      for (const row of newest.iterate(left, session)) {
+        if (row.bytes > left) break;
+        left -= row.bytes ?? 0;
+        results.push(row);
+        if (fullTodos(object(parse(row.content))) !== null) break;
+      }
+      results.reverse();
+      const ids = [...new Set(results.filter((row) => /^(?:\[todo\] updated task list|\[tool_call\] )/.test(row.content ?? "")).flatMap((row) => row.tool_call_id ? [row.tool_call_id] : []))];
+      const calls: HermesPlanRow[] = [];
+      if (ids.length && left > 0) {
+        const needed = db.query<{ call: string; bytes: number }, [number, string, string]>(`SELECT entry.value AS call, length(CAST(entry.value AS BLOB)) AS bytes
+          FROM messages, json_each(CASE WHEN length(CAST(tool_calls AS BLOB)) <= ? AND json_valid(tool_calls) THEN tool_calls ELSE '[]' END) AS entry
+          WHERE session_id = ? AND role = 'assistant' AND (active = 1 OR compacted = 1) AND entry.type = 'object'
+            AND (json_extract(entry.value, '$.id') IN (SELECT value FROM json_each(?3))
+              OR json_extract(entry.value, '$.call_id') IN (SELECT value FROM json_each(?3)))
+          ORDER BY messages.id LIMIT 200`);
+        for (const row of needed.iterate(left, session, JSON.stringify(ids))) {
+          if (row.bytes > left) break;
+          left -= row.bytes;
+          calls.push({ role: "assistant", tool_name: null, content: null, tool_call_id: null, tool_calls: `[${row.call}]`, active: 1, compacted: 0 });
+        }
+      }
       const steps = parseHermesPlan([...calls, ...results]);
       remember(this.cache, key, { signature, steps }, 256);
       return steps;

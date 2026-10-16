@@ -1,11 +1,12 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { HerdrPane } from "../shared/protocol.ts";
 import { HermesPlans, parseHermesPlan, type HermesPlanRow } from "./hermes-plan.ts";
+import * as client from "./herdr/client.ts";
 
 const item = (id: string, status = "pending", extra = {}) => ({ id, content: `Step ${id}`, status, ...extra });
 const result = (todos: unknown[], extra = {}): HermesPlanRow => ({ role: "tool", tool_name: "todo_list", content: JSON.stringify({ todos }), tool_call_id: null, tool_calls: null, active: 1, compacted: 0, ...extra });
@@ -82,7 +83,79 @@ describe("Hermes plan", () => {
     expect(progress([result([item("a")]), ...stub([{ id: "b" }])])).toEqual(["a:pending"]);
   });
 
-  test("reads only the reported session, follows new rows and rewinds, and handles missing stores", () => {
+  test.skipIf(process.platform !== "linux" && process.platform !== "darwin")("uses the pane process's home, caches discovery, and forgets departed panes", async () => {
+    dir = mkdtempSync(join(tmpdir(), "hermes-plan-homes-"));
+    const profile = join(dir, "profile");
+    mkdirSync(profile);
+    for (const [home, id] of [[dir, "default"], [profile, "profile"]] as const) {
+      const db = new Database(join(home, "state.db"));
+      db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, tool_name TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, active INTEGER, compacted INTEGER)");
+      db.query("INSERT INTO messages VALUES (1, 'session-a', 'tool', 'todo_list', ?, NULL, NULL, 1, 0)").run(result([item(id)]).content);
+      db.close();
+    }
+    const child = Bun.spawn([process.execPath, "-e", "console.log('ready'); for await (const _ of Bun.stdin.stream()) {}"], { env: { ...process.env, HERMES_HOME: profile }, stdin: "pipe", stdout: "pipe" });
+    const rpc = spyOn(client, "herdrRpc").mockResolvedValue({ process_info: { foreground_processes: [{ pid: child.pid, name: "hermes", argv: ["hermes"] }] } });
+    const previous = process.env["HERMES_HOME"];
+    process.env["HERMES_HOME"] = dir;
+    const pane = { pane_id: "%plan", cwd: dir, agent: "hermes", agent_session: { agent: "hermes", source: "herdr:hermes", kind: "id", value: "session-a" } } as HerdrPane;
+    try {
+      await child.stdout.getReader().read();
+      const plans = new HermesPlans();
+      await plans.refresh([pane]);
+      expect(plans.read(pane)?.map((step) => step.id)).toEqual(["profile"]);
+      await plans.refresh([pane]);
+      expect(rpc).toHaveBeenCalledTimes(1);
+      expect(rpc).toHaveBeenCalledWith("pane.process_info", { pane_id: pane.pane_id });
+      await plans.refresh([{ ...pane, agent: "shell" } as never]);
+      expect(plans.read(pane)).toBeNull();
+      await plans.refresh([pane]);
+      expect(plans.read(pane)?.[0]?.id).toBe("profile");
+      await plans.refresh([]);
+      expect(plans.read(pane)).toBeNull();
+      await plans.refresh([{ ...pane, agent_session: { ...pane.agent_session, source: "unknown" } } as never]);
+      expect(plans.read(pane)).toBeNull();
+      expect(rpc).toHaveBeenCalledTimes(2);
+    } finally {
+      rpc.mockRestore();
+      if (previous === undefined) delete process.env["HERMES_HOME"]; else process.env["HERMES_HOME"] = previous;
+      child.kill();
+      await child.exited;
+    }
+  });
+
+  test("bounds a long stub/failure history and reads no contents on an unchanged poll", async () => {
+    dir = mkdtempSync(join(tmpdir(), "hermes-plan-budget-"));
+    const path = join(dir, "state.db");
+    const db = new Database(path);
+    db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, tool_name TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, active INTEGER, compacted INTEGER); CREATE INDEX session_messages ON messages(session_id, id)");
+    const add = (row: HermesPlanRow) => db.query("INSERT INTO messages (session_id, role, tool_name, content, tool_calls, tool_call_id, active, compacted) VALUES ('session-a', ?, ?, ?, ?, ?, ?, ?)").run(row.role, row.tool_name, row.content, row.tool_calls, row.tool_call_id, row.active, row.compacted);
+    const pane = { pane_id: "%budget", agent: "hermes", agent_session: { agent: "hermes", source: "herdr:hermes", kind: "id", value: "session-a" } } as HerdrPane;
+    const plans = new HermesPlans({ path: () => path });
+    try {
+      add(result([item("too-old")]));
+      db.transaction(() => { for (let i = 0; i < 1000; i++) add(result([], { content: `Tool 'todo_list' failed ${"x".repeat(512)}` })); })();
+      await plans.refresh([pane]);
+      expect(plans.read(pane)).toBeNull(); // the old snapshot is beyond the row budget
+      db.transaction(() => {
+        for (let i = 0; i < 250; i++) add({ ...stub([])[0]!, tool_calls: JSON.stringify([{ id: `unrelated-${i}`, function: { name: "todo_list", arguments: JSON.stringify({ todos: [item("unrelated")] }) } }]) });
+      })();
+      for (const row of stub([item("recent")])) add(row);
+      const queries = spyOn(Database.prototype, "query");
+      try {
+        expect(plans.read(pane)?.[0]?.id).toBe("recent");
+        queries.mockClear();
+        expect(plans.read(pane)?.[0]?.id).toBe("recent");
+        expect(queries.mock.calls).toHaveLength(1);
+        expect(queries.mock.calls[0]![0]).not.toMatch(/\bcontent\b|\btool_calls\b/i);
+      } finally { queries.mockRestore(); }
+      for (let i = 0; i < 2; i++) add(result([], { content: `Tool 'todo_list' failed ${"x".repeat(600 * 1024)}` }));
+      expect(plans.read(pane)).toBeNull(); // the cumulative byte budget stops before the recent stub
+      add(result([item("oversized", "pending", { content: "x".repeat(1024 * 1024 + 1) })]));
+      expect(plans.read(pane)).toBeNull(); // never parse an oversized row
+    } finally { db.close(); }
+  });
+
+  test("reads only the reported session, follows new rows and rewinds, and handles missing stores", async () => {
     dir = mkdtempSync(join(tmpdir(), "hermes-plan-"));
     const path = join(dir, "state.db");
     const db = new Database(path);
@@ -90,6 +163,7 @@ describe("Hermes plan", () => {
     const add = (session: string, row: HermesPlanRow) => db.query("INSERT INTO messages (session_id, role, tool_name, content, tool_calls, tool_call_id, active, compacted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(session, row.role, row.tool_name, row.content, row.tool_calls, row.tool_call_id, row.active, row.compacted);
     const pane = { agent: "hermes", agent_session: { agent: "hermes", source: "herdr:hermes", kind: "id", value: "session-a" } } as HerdrPane;
     const plans = new HermesPlans({ path: () => path });
+    await plans.refresh([pane]);
     try {
       add("session-a", result([item("a")]));
       add("session-b", result([item("private")]));
@@ -103,6 +177,8 @@ describe("Hermes plan", () => {
       expect(plans.read({ ...pane, agent: "shell" } as never)).toBeNull();
       expect(plans.read({ ...pane, agent_session: { ...pane.agent_session, source: "unknown" } } as never)).toBeNull();
     } finally { db.close(); }
-    expect(new HermesPlans({ path: () => join(dir, "missing.db") }).read(pane)).toBeNull();
+    const missing = new HermesPlans({ path: () => join(dir, "missing.db") });
+    await missing.refresh([pane]);
+    expect(missing.read(pane)).toBeNull();
   });
 });
