@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { HerdrPane, PlanSummary } from "../shared/protocol.ts";
+import { parseHermesPlan, type HermesPlanRow } from "./hermes-plan.ts";
 import { paneAfterStatus } from "./machines.ts";
 import { forgetPlans, planSummary, readPlan, SessionPlans } from "./session-plan.ts";
 
@@ -181,6 +182,31 @@ describe("SessionPlans", () => {
     await plans.refresh([pane("p1", "shell"), pane("p2", "codex")]);
     expect(changes.at(-1)).toEqual(["p1", null]);
     expect(plans.summaryOf("p1")).toBeNull();
+  });
+
+  it("tells a Hermes pane's summary as newer todo rows arrive and clears it when the pane leaves", async () => {
+    const rows: HermesPlanRow[] = [];
+    const add = (status: string) => rows.push({ role: "tool", tool_name: "todo_list", tool_call_id: null, tool_calls: null, active: 1, compacted: 0, content: JSON.stringify({ todos: [{ id: "a", content: "Study", status }, { id: "b", content: "Build", status: "pending" }] }) });
+    const changes: (PlanSummary | null)[] = [];
+    let reads = 0;
+    const plans = new SessionPlans({ claudePath: () => null, codexPath: async () => null, hermesPlan: () => { reads++; return parseHermesPlan(rows); }, onChange: (_id, summary) => changes.push(summary) });
+    add("in_progress");
+    await plans.refresh([pane("h1", "hermes")]);
+    expect(reads).toBe(0);
+    plans.poll();
+    expect(plans.known(pane("h1", "hermes"))).toBe(true);
+    expect(changes).toEqual([{ done: 0, total: 2, current: "Study" }]);
+    add("completed");
+    expect(plans.planOf(pane("h1", "hermes"))?.[0]?.status).toBe("in_progress");
+    expect(reads).toBe(1);
+    plans.poll();
+    plans.poll();
+    expect(changes).toEqual([{ done: 0, total: 2, current: "Study" }, { done: 1, total: 2, current: null }]);
+    expect(plans.planOf(pane("h1", "hermes", "s2"))).toBeNull();
+    await plans.refresh([pane("h1", "shell")]);
+    expect(changes.at(-1)).toBeNull();
+    expect(plans.summaryOf("h1")).toBeNull();
+    expect(plans.planOf(pane("h1", "shell"))).toBeNull();
   });
 
   it("looks a Codex pane's rollout up again when its session changes", async () => {

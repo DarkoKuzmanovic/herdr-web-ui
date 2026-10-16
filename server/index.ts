@@ -31,6 +31,7 @@ import { omoRuns, omoTasks } from "./omo-tasks.ts";
 import { ClaudeSubagentStatus, claudeSubagents, within } from "./claude-subagents.ts";
 import { BackgroundWait } from "./background-wait.ts";
 import { SessionPlans } from "./session-plan.ts";
+import { HermesPlans } from "./hermes-plan.ts";
 import { codexOpenRollout, paneCodexHome } from "./codex.ts";
 import { HermesDelegations } from "./hermes-delegations.ts";
 import { CompletionTracker, type OmoRest } from "./completion.ts";
@@ -1158,7 +1159,9 @@ export function createServer(
     onChange: (paneId, running, turnRunning, promptAt) => claudeAgentsChanged(paneId, running, turnRunning, promptAt),
   });
   /** the plan each Claude Code and Codex pane's agent keeps, for the sidebar's progress (server/session-plan.ts) */
+  const hermesPlans = new HermesPlans();
   const plans = new SessionPlans({
+    hermesPlan: (pane) => hermesPlans.read(pane),
     claudePath: (paneId) => claudeAgents.sessionOf(paneId)?.path ?? null,
     // only what is certain without reading the screen: the chat's own matching stays the chat's
     codexPath: async (pane) => codexOpenRollout(pane.pane_id, pane.cwd, await paneCodexHome(pane.pane_id, options.codexHome)),

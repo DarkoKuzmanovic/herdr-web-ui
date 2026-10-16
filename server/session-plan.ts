@@ -199,6 +199,8 @@ export interface SessionPlanDeps {
   codexPath: (pane: HerdrPane) => Promise<string | null>;
   /** a pane's summary changed (null: it has no plan now) */
   onChange: (paneId: string, summary: PlanSummary | null) => void;
+  /** Hermes reads its todo list from SQLite, only at a poll. */
+  hermesPlan?: (pane: HerdrPane) => PlanStep[] | null;
   now?: () => number;
   /** how soon a Codex pane whose rollout was not found is looked up again */
   retryMs?: number;
@@ -208,6 +210,7 @@ export interface SessionPlanDeps {
 }
 
 interface Tracked {
+  hermes?: { pane: HerdrPane; steps: PlanStep[] | null };
   key: string;
   at: number;
   where: { source: PlanSource; path: string } | null;
@@ -255,7 +258,9 @@ export class SessionPlans {
    * none, or its transcript is not known for the session it runs, or not read to its end yet.
    */
   planOf(pane: HerdrPane | undefined): PlanStep[] | null {
-    const where = pane !== undefined && this.known(pane) ? this.panes.get(pane.pane_id)?.where : null;
+    const tracked = pane !== undefined && this.known(pane) ? this.panes.get(pane.pane_id) : null;
+    if (tracked?.hermes) return tracked.hermes.steps;
+    const where = tracked?.where;
     // a request reads nothing itself, however much was written since: the poll reads, in its shared budget
     return where ? readPlan(where.source, where.path, { left: 0 }) : null;
   }
@@ -263,7 +268,7 @@ export class SessionPlans {
   /** The pane's transcript is known, and was found for the session the pane runs now. */
   known(pane: HerdrPane): boolean {
     const tracked = this.panes.get(pane.pane_id);
-    return tracked?.where != null && tracked.key === keyOf(pane);
+    return tracked !== undefined && (tracked.where !== null || tracked.hermes !== undefined) && tracked.key === keyOf(pane);
   }
 
   /**
@@ -273,7 +278,7 @@ export class SessionPlans {
   async refresh(panes: HerdrPane[]): Promise<void> {
     this.wanted.clear();
     this.refreshed = true;
-    for (const pane of panes) if (pane.agent === "claude" || pane.agent === "codex") this.wanted.set(pane.pane_id, keyOf(pane));
+    for (const pane of panes) if (pane.agent === "claude" || pane.agent === "codex" || pane.agent === "hermes") this.wanted.set(pane.pane_id, keyOf(pane));
     for (const [paneId, tracked] of this.panes) {
       if (this.wanted.has(paneId)) continue;
       this.panes.delete(paneId);
@@ -287,8 +292,14 @@ export class SessionPlans {
    * `asked`: a request names the pane from a snapshot of its own, which the last refresh may not have seen yet.
    */
   async ensure(pane: HerdrPane, asked = false): Promise<void> {
-    if (pane.agent !== "claude" && pane.agent !== "codex") return;
+    if (pane.agent !== "claude" && pane.agent !== "codex" && pane.agent !== "hermes") return;
     const key = keyOf(pane);
+    if (pane.agent === "hermes") {
+      const current = this.panes.get(pane.pane_id);
+      this.track(pane.pane_id, key, null);
+      if (this.deps.hermesPlan) this.panes.get(pane.pane_id)!.hermes = { pane, steps: current?.key === key ? current.hermes?.steps ?? null : null };
+      return;
+    }
     if (pane.agent === "claude") {
       const path = this.deps.claudePath(pane.pane_id);
       this.track(pane.pane_id, key, path === null ? null : { source: "claude-transcript", path });
@@ -323,7 +334,10 @@ export class SessionPlans {
     const budget = { left: PLAN_BUDGET };
     for (const [paneId, tracked] of this.panes) {
       let summary: PlanSummary | null = null;
-      if (tracked.where !== null) {
+      if (tracked.hermes) {
+        tracked.hermes.steps = this.deps.hermesPlan?.(tracked.hermes.pane) ?? null;
+        summary = planSummary(tracked.hermes.steps);
+      } else if (tracked.where !== null) {
         const stat = plain(tracked.where.path);
         const sig = stat === null ? null : `${stat.id}:${stat.size}`;
         if (sig !== null && sig === tracked.sig) continue;
