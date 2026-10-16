@@ -125,7 +125,7 @@ describe("Hermes skill activity", () => {
     expect(skillOf([call({ name: "tools/review" })])).toEqual({ name: "tools/review", evidence: "invocation", status: "requested" });
     expect(skillOf([call({ name: "tools/review" }), output({ success: true, name: "review", path: "tools/review/SKILL.md" })]))
       .toEqual({ name: "tools/review", evidence: "invocation", status: "loaded", path: "tools/review/SKILL.md" });
-    expect(skillOf([call({ name: "plugin:review", file_path: "references/checks.md" }), output({ success: true, path: "references/checks.md" })]))
+    expect(skillOf([call({ name: "plugin:review", file_path: "references/checks.md" }), output({ success: true, name: "plugin:review", file: "references/checks.md", content: "Fictional reference." })]))
       .toEqual({ name: "plugin:review", evidence: "invocation", status: "loaded", path: "references/checks.md" });
     expect(skillOf([call({ name: "missing" }), output({ success: false, error: "Not found" })]))
       .toEqual({ name: "missing", evidence: "invocation", status: "failed" });
@@ -382,19 +382,22 @@ describe("hermesConversationPage SQLite integration", () => {
     } finally { db.close(); }
   });
 
-  it("keeps skill metadata when the tool's instructions exceed the output preview", () => {
+  it.each([
+    { args: { name: "review" }, result: { path: "tools/review/SKILL.md" }, path: "tools/review/SKILL.md" },
+    { args: { name: "review", file_path: "references/checks.md" }, result: { file: "references/checks.md" }, path: "references/checks.md" },
+  ])("keeps skill metadata when the tool's instructions exceed the output preview: $path", ({ args, result, path }) => {
     const db = new Database(dbPath);
     try {
       db.query("INSERT INTO sessions (id, started_at) VALUES (?, ?)").run("s_skill", 1700000000);
       const insert = db.query("INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, tool_name, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)");
       insert.run("s_skill", "assistant", null, JSON.stringify([
-        { id: "load-skill", function: { name: "skill_view", arguments: '{"name":"review"}' } },
+        { id: "load-skill", function: { name: "skill_view", arguments: JSON.stringify(args) } },
       ]), null, null, 1700000001);
-      insert.run("s_skill", "tool", JSON.stringify({ success: true, content: "Instructions\n".repeat(5000), name: "review", path: "tools/review/SKILL.md" }), null, "load-skill", "skill_view", 1700000002);
+      insert.run("s_skill", "tool", JSON.stringify({ success: true, content: "Instructions\n".repeat(5000), name: "review", ...result }), null, "load-skill", "skill_view", 1700000002);
     } finally { db.close(); }
     const page = hermesConversationPage("s_skill", dbPath);
     const part = page.turns[0]!.parts[0]!;
-    expect(part).toMatchObject({ kind: "tool", skill: { name: "review", status: "loaded", path: "tools/review/SKILL.md" } });
+    expect(part).toMatchObject({ kind: "tool", skill: { name: "review", status: "loaded", path } });
     expect(part.kind === "tool" && part.output.length).toBeLessThan(10000);
     expect(hermesConversationPage("s_skill", dbPath).turns).toBe(page.turns);
   });

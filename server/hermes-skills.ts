@@ -5,7 +5,7 @@ import { invokedSkill } from "./skill-activity.ts";
 /** Read only the metadata of oversized skill results, after the unchanged-page cache check. */
 export function hermesSkillResult(db: Database, id: number): string | null {
   return db.query<{ result: string | null }, [number]>(`SELECT CASE WHEN json_valid(content) THEN
-    json_object('success', content -> '$.success', 'name', content -> '$.name', 'path', content -> '$.path')
+    json_object('success', content -> '$.success', 'name', content -> '$.name', 'path', content -> '$.path', 'file', content -> '$.file')
     END AS result FROM messages WHERE id = ?`).get(id)?.result ?? null;
 }
 
@@ -21,7 +21,8 @@ export function hermesSkill(name: string, input: Record<string, unknown>, output
   if (!skill) return null;
   if (result.success === true) skill.status = "loaded";
   else if (result.success === false || /^(?:error|failed|exception)\b/i.test(output?.trim() ?? "")) skill.status = "failed";
-  if (typeof result.path === "string" && result.path.length <= 4096 && !/[\r\n]/.test(result.path)) skill.path = result.path;
+  const path = result.path ?? result.file;
+  if (typeof path === "string" && path.length <= 4096 && !/[\r\n]/.test(path)) skill.path = path;
   return skill;
 }
 
