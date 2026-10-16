@@ -1,7 +1,7 @@
 /** Pane-owned Hermes stores; discovery stays outside synchronous polling. */
 import type { HerdrPane } from "../shared/protocol.ts";
 import { hermesSessionId } from "./hermes-delegations.ts";
-import { hermesTranscriptForPane } from "./hermes.ts";
+import { hermesDbPath, hermesTranscriptForPane } from "./hermes.ts";
 
 export class HermesStores {
   private readonly panes = new Map<string, { session: string; path: string | null; at: number }>();
@@ -25,7 +25,8 @@ export class HermesStores {
     try {
       const resolved = this.resolve ? this.resolve(pane) : hermesTranscriptForPane(pane, pane.cwd ?? "").then((transcript) => transcript.dbPath);
       const path = typeof resolved === "string" ? resolved : await resolved;
-      if (this.panes.get(pane.pane_id) === entry) entry.path = path;
+      // shortcut: hermesTranscriptForPane answers the server's default store when it cannot see the pane's process, so a session's known store is kept over that answer; upgrade when it reports which store it found
+      if (this.panes.get(pane.pane_id) === entry) entry.path = known?.session === session && known.path && path === hermesDbPath() ? known.path : path;
     } catch { /* unavailable stores are retried on the next discovery interval */ }
   }
 
