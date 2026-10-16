@@ -106,6 +106,45 @@ describe("hermes terminal breadcrumb resolution", () => {
   });
 });
 
+describe("Hermes skill activity", () => {
+  const row = (fields: Partial<HermesMessageRow>): HermesMessageRow => ({
+    id: 1, role: "user", content: null, tool_call_id: null, tool_calls: null,
+    tool_name: null, reasoning: null, timestamp: 1700000000, ...fields,
+  });
+  const call = (args: Record<string, unknown>) => row({ role: "assistant", tool_calls: JSON.stringify([
+    { id: "skill-call", function: { name: "skill_view", arguments: JSON.stringify(args) } },
+  ]) });
+  const output = (value: unknown) => row({ role: "tool", tool_call_id: "skill-call", content: JSON.stringify(value) });
+  const skillOf = (rows: HermesMessageRow[]) => {
+    const part = parseHermesRows(rows)[0]!.parts[0]!;
+    expect(part.kind).toBe("tool");
+    return part.kind === "tool" ? part.skill : null;
+  };
+
+  it("marks skill_view requested, loaded or failed from its paired result, including linked files", () => {
+    expect(skillOf([call({ name: "tools/review" })])).toEqual({ name: "tools/review", evidence: "invocation", status: "requested" });
+    expect(skillOf([call({ name: "tools/review" }), output({ success: true, name: "review", path: "tools/review/SKILL.md" })]))
+      .toEqual({ name: "tools/review", evidence: "invocation", status: "loaded", path: "tools/review/SKILL.md" });
+    expect(skillOf([call({ name: "plugin:review", file_path: "references/checks.md" }), output({ success: true, path: "references/checks.md" })]))
+      .toEqual({ name: "plugin:review", evidence: "invocation", status: "loaded", path: "references/checks.md" });
+    expect(skillOf([call({ name: "missing" }), output({ success: false, error: "Not found" })]))
+      .toEqual({ name: "missing", evidence: "invocation", status: "failed" });
+    expect(skillOf([call({}), output({ success: true, name: "review", path: "tools/review/SKILL.md" })]))
+      .toEqual({ name: "review", evidence: "invocation", status: "loaded", path: "tools/review/SKILL.md" });
+  });
+
+  it("replaces only an anchored invocation envelope with its skill and optional typed instruction", () => {
+    const envelope = '[IMPORTANT: The user has invoked the "review" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]\n\nFictional skill instructions.';
+    const skill: ConversationPart = { kind: "skill", skill: { name: "review", evidence: "instructions", status: "loaded" } };
+    expect(parseHermesRows([row({ content: envelope })])[0]!.parts).toEqual([skill]);
+    const typed = "  Check this patch.\nKeep it small.\n";
+    expect(parseHermesRows([row({ content: `${envelope}\n\nThe user has provided the following instruction alongside the skill invocation: ${typed}` })])[0]!.parts)
+      .toEqual([skill, { kind: "text", text: typed }]);
+    const normal = `Please explain this example:\n${envelope}`;
+    expect(parseHermesRows([row({ content: normal })])[0]!.parts).toEqual([{ kind: "text", text: normal }]);
+  });
+});
+
 describe("hermes message rows parsing", () => {
   it("uses the first nonblank code line for Hermes code calls, falling back to file and other fields", () => {
     expect(hermesToolSummary("execute_code", { code: "\nprint('hello')\nprint('world')", file_path: "script.py" })).toBe("print('hello')");
@@ -312,6 +351,52 @@ describe("hermesConversationPage SQLite integration", () => {
   afterEach(() => {
     forgetHermesTranscriptState();
     rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("renders batch completion cards with plain-text fallback and no lookup on unchanged pages", () => {
+    const db = new Database(dbPath);
+    const missing = "[ASYNC DELEGATION BATCH COMPLETE — deleg_missing]\nOriginal result.";
+    try {
+      db.query("INSERT INTO sessions (id, started_at) VALUES (?, ?)").run("s_batch", 1700000000);
+      db.exec("CREATE TABLE async_delegations (delegation_id TEXT, origin_session TEXT, task_json TEXT, result_json TEXT)");
+      db.query("INSERT INTO async_delegations VALUES (?, ?, ?, ?)").run("deleg_cards", "s_batch", JSON.stringify({ goals: ["Inspect", "Test"] }), JSON.stringify({ results: [
+        { task_index: 0, status: "completed", summary: "Inspected" },
+        { task_index: 1, status: "failed", summary: "Test failed" },
+      ] }));
+      const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)");
+      insert.run("s_batch", "[ASYNC DELEGATION BATCH COMPLETE — deleg_cards]\nConsolidated result.", 1700000001);
+      insert.run("s_batch", missing, 1700000002);
+      const page = hermesConversationPage("s_batch", dbPath);
+      expect(page.turns).toHaveLength(2);
+      expect(page.turns[0]!.role).toBe("user");
+      expect(page.turns[0]!.parts).toHaveLength(1);
+      const part = page.turns[0]!.parts[0]!;
+      expect(part.kind).toBe("task_result");
+      if (part.kind !== "task_result") throw new Error("Expected result cards");
+      expect(part.tasks.map(task => [task.id, task.title, task.status, task.result])).toEqual([
+        ["deleg_cards:0", "Inspect", "completed", "Inspected"], ["deleg_cards:1", "Test", "failed", "Test failed"],
+      ]);
+      expect(page.turns[1]!.parts).toEqual([{ kind: "text", text: missing }]);
+      db.exec("DROP TABLE async_delegations");
+      expect(hermesConversationPage("s_batch", dbPath).turns).toBe(page.turns);
+    } finally { db.close(); }
+  });
+
+  it("keeps skill metadata when the tool's instructions exceed the output preview", () => {
+    const db = new Database(dbPath);
+    try {
+      db.query("INSERT INTO sessions (id, started_at) VALUES (?, ?)").run("s_skill", 1700000000);
+      const insert = db.query("INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, tool_name, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      insert.run("s_skill", "assistant", null, JSON.stringify([
+        { id: "load-skill", function: { name: "skill_view", arguments: '{"name":"review"}' } },
+      ]), null, null, 1700000001);
+      insert.run("s_skill", "tool", JSON.stringify({ success: true, content: "Instructions\n".repeat(5000), name: "review", path: "tools/review/SKILL.md" }), null, "load-skill", "skill_view", 1700000002);
+    } finally { db.close(); }
+    const page = hermesConversationPage("s_skill", dbPath);
+    const part = page.turns[0]!.parts[0]!;
+    expect(part).toMatchObject({ kind: "tool", skill: { name: "review", status: "loaded", path: "tools/review/SKILL.md" } });
+    expect(part.kind === "tool" && part.output.length).toBeLessThan(10000);
+    expect(hermesConversationPage("s_skill", dbPath).turns).toBe(page.turns);
   });
 
   it("throws ConversationNotStarted when session has no messages", () => {

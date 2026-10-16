@@ -5,12 +5,14 @@ import { existsSync, readFileSync, readlinkSync, realpathSync, statSync } from "
 import { isAbsolute, join } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 
-import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
+import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane, OmoTaskResult } from "../shared/protocol.ts";
 import { herdrRpc } from "./herdr/client.ts";
 import { answerVersion, ConversationNotStarted, ConversationUnavailable, type ConversationPage, HistoryChanged, type RecognizedConversation, TRANSCRIPT_WINDOW_BYTES } from "./conversation.ts";
 import { toolSummary } from "./transcript-records.ts";
 import { TOOL_OUTPUT_CHARS, trimOutput } from "./tool-output.ts";
 import { processStartedAt } from "./process-start.ts";
+import { hermesSkill, hermesSkillInvocation, hermesSkillResult } from "./hermes-skills.ts";
+import { hermesDelegationResults } from "./hermes-delegations.ts";
 
 export interface HermesMessageRow {
   id: number;
@@ -23,6 +25,7 @@ export interface HermesMessageRow {
   reasoning: string | null;
   timestamp: number;
   output_size?: number | null;
+  skill_result?: string | null;
   content_bytes?: number | null;
   reasoning_chars?: number | null;
 }
@@ -607,7 +610,10 @@ export function hermesConversationPage(
       if (cached?.signature === signature) {
         return { source: "hermes-transcript", turns: cached.turns, metadata, cursor, history_id: historyId, version };
       }
-      const turns = parseHermesRows(rows, identity);
+      for (const row of rows) {
+        if (row.role === "tool" && row.tool_name === "skill_view" && (row.output_size ?? 0) > (row.content?.length ?? 0)) row.skill_result = hermesSkillResult(db, row.id);
+      }
+      const turns = parseHermesRows(rows, identity, (text) => hermesDelegationResults(db, sessionId, text));
       hermesCache.set(cacheKey, { signature, turns });
       if (hermesCache.size > 64) hermesCache.delete(hermesCache.keys().next().value!);
 
@@ -631,7 +637,7 @@ export function hermesConversationPage(
 }
 
 /** Groups assistant activity and matched tool results into turns, preserving recorded reasoning. */
-export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: string): ConversationTurn[] {
+export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: string, delegationResults?: (text: string) => OmoTaskResult[] | null): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
   const pendingTools = new Map<string, Extract<ConversationPart, { kind: "tool" }>>();
   const makeRef = (callId: string) => identity ? hermesOutputRef(identity, callId) : callId;
@@ -641,10 +647,18 @@ export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: st
 
       if (row.role === "user") {
         const text = typeof row.content === "string" ? row.content : "";
+        const tasks = delegationResults?.(text);
+        if (tasks) {
+          turns.push({ role: "user", ts, parts: [{ kind: "task_result", tasks }] });
+          continue;
+        }
+        const invocation = hermesSkillInvocation(text);
         turns.push({
           role: "user",
           ts,
-          parts: [{ kind: "text", text }],
+          parts: invocation
+            ? [{ kind: "skill", skill: invocation.skill }, ...(invocation.request ? [{ kind: "text" as const, text: invocation.request }] : [])]
+            : [{ kind: "text", text }],
         });
       } else if (row.role === "assistant") {
         let turn = turns[turns.length - 1];
@@ -678,6 +692,8 @@ export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: st
                   input: inputStr,
                   output: "",
                 };
+                const skill = hermesSkill(name, inputObj);
+                if (skill) toolPart.skill = skill;
                 turn.parts.push(toolPart);
                 if (callId) pendingTools.set(callId, toolPart);
               }
@@ -701,6 +717,8 @@ export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: st
 
         if (toolPart) {
           trimOutput(toolPart, output, makeRef(callId), row.output_size ?? undefined);
+          const skill = hermesSkill(toolPart.name, parseToolInput(toolPart.input).inputObj, row.skill_result ?? rawOutput);
+          if (skill) toolPart.skill = skill;
           if (isFailed) toolPart.error = true;
           pendingTools.delete(callId);
         } else {

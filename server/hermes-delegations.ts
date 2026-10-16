@@ -5,7 +5,7 @@
 
 import { Database } from "bun:sqlite";
 
-import type { HerdrPane } from "../shared/protocol.ts";
+import type { HerdrPane, OmoTaskResult } from "../shared/protocol.ts";
 import { hermesDbPath } from "./hermes.ts";
 
 const BUSY_TIMEOUT_MS = 250;
@@ -19,6 +19,58 @@ export function hermesSessionId(pane: Pick<HerdrPane, "agent_session">): string 
   const session = pane.agent_session;
   if (session?.agent !== "hermes" || session.source !== "herdr:hermes" || session.kind !== "id" || !SESSION_ID.test(session.value)) return null;
   return session.value;
+}
+
+const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+const numeric = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+const text = (value: unknown): string | null => typeof value === "string" ? value : null;
+
+/** Completion evidence belongs to this session; missing or newer shapes retain the original notice. */
+export function hermesDelegationResults(db: Database, session: string, content: string): OmoTaskResult[] | null {
+  const match = /^\[ASYNC DELEGATION BATCH COMPLETE — (deleg_[A-Za-z0-9_-]+)\](?:\r?\n|$)/.exec(content);
+  if (!match) return null;
+  try {
+    const row = db.query<{ task_json: string; result_json: string }, [string, string]>(
+      "SELECT task_json, result_json FROM async_delegations WHERE delegation_id = ? AND origin_session = ?",
+    ).get(match[1]!, session);
+    if (!row) return null;
+    const task = record(JSON.parse(row.task_json) as unknown);
+    const batch = record(JSON.parse(row.result_json) as unknown);
+    if (!task || !Array.isArray(batch?.results) || batch.results.length === 0) return null;
+    const tasks: OmoTaskResult[] = [];
+    for (const value of batch.results) {
+      const result = record(value);
+      const index = numeric(result?.task_index);
+      if (!result || index === null || !Number.isSafeInteger(index)) return null;
+      const title = text(Array.isArray(task.goals) ? task.goals[index] : null) ?? text(task.goal);
+      const summary = text(result.summary);
+      const status = result.status === "completed" ? "completed"
+        : ["error", "failed", "timeout"].includes(String(result.status)) ? "failed"
+        : ["interrupted", "cancelled"].includes(String(result.status)) ? "cancelled" : null;
+      if (title === null || summary === null || status === null) return null;
+      const usage = record(result.tokens);
+      const input = numeric(usage?.input ?? 0);
+      const output = numeric(usage?.output ?? 0);
+      const tokens = usage ? input !== null && output !== null && ("input" in usage || "output" in usage) ? numeric(input + output) : null : numeric(result.tokens);
+      const seconds = numeric(result.duration_seconds);
+      tasks.push({
+        id: `${match[1]}:${index}`,
+        title,
+        agent: text(task.role),
+        model: text(result.model) ?? text(task.model),
+        status,
+        duration_ms: seconds === null ? null : numeric(seconds * 1000),
+        turns: numeric(result.api_calls),
+        tool_calls: Array.isArray(result.tool_trace) ? result.tool_trace.length : null,
+        tokens,
+        result: summary.slice(0, 16_000),
+        ...(summary.length > 16_000 || result.truncated === true ? { result_cut: true } : {}),
+      });
+    }
+    return tasks;
+  } catch {
+    return null; // older schema, invalid JSON, or a busy store: keep the transcript's own result
+  }
 }
 
 /** Whether the process that owns a delegation still runs: a killed Hermes leaves its rows `running` until it starts again. */
