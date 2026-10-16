@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import type { HerdrPane, PlanStep } from "../shared/protocol.ts";
 import { remember } from "./claude-subagents.ts";
 import { hermesSessionId } from "./hermes-delegations.ts";
-import { hermesTranscriptForPane } from "./hermes.ts";
+import { HermesStores } from "./hermes-stores.ts";
 
 export interface HermesPlanRow {
   role: string;
@@ -116,34 +116,24 @@ export function parseHermesPlan(rows: readonly HermesPlanRow[]): PlanStep[] | nu
 /** No open handles between polls; store discovery never blocks the synchronous reader. */
 export class HermesPlans {
   private readonly cache = new Map<string, { signature: string; steps: PlanStep[] | null }>();
-  private readonly panes = new Map<string, { session: string; path: string | null; at: number }>();
+  private readonly stores: HermesStores;
 
-  constructor(private readonly deps: { path?: (pane: HerdrPane) => string | Promise<string> } = {}) {}
-
-  async refresh(panes: readonly HerdrPane[]): Promise<void> {
-    const wanted = new Set(panes.filter((pane) => pane.agent === "hermes" && hermesSessionId(pane)).map((pane) => pane.pane_id));
-    for (const id of this.panes.keys()) if (!wanted.has(id)) this.panes.delete(id);
-    await Promise.all(panes.map((pane) => this.ensure(pane)));
+  constructor(deps: { path?: (pane: HerdrPane) => string | Promise<string> } = {}) {
+    this.stores = new HermesStores(deps.path);
   }
 
-  async ensure(pane: HerdrPane): Promise<void> {
-    const session = pane.agent === "hermes" ? hermesSessionId(pane) : null;
-    if (!session) { this.panes.delete(pane.pane_id); return; }
-    const known = this.panes.get(pane.pane_id);
-    if (known?.session === session && Date.now() - known.at < 30_000) return;
-    const entry = { session, path: null as string | null, at: Date.now() };
-    this.panes.set(pane.pane_id, entry);
-    try {
-      const path = this.deps.path ? await this.deps.path(pane) : (await hermesTranscriptForPane(pane, pane.cwd ?? "")).dbPath;
-      if (this.panes.get(pane.pane_id) === entry) entry.path = path;
-    } catch { /* unavailable stores are retried on the next discovery interval */ }
+  refresh(panes: readonly HerdrPane[]): Promise<void> {
+    return this.stores.refresh(panes);
+  }
+
+  ensure(pane: HerdrPane): Promise<void> {
+    return this.stores.ensure(pane);
   }
 
   read(pane: HerdrPane): PlanStep[] | null {
     const session = pane.agent === "hermes" ? hermesSessionId(pane) : null;
-    const store = this.panes.get(pane.pane_id);
-    if (!session || store?.session !== session || !store.path) return null;
-    const path = store.path;
+    const path = session ? this.stores.path(pane.pane_id, session) : null;
+    if (!session || !path) return null;
     let db: Database;
     try { db = new Database(path, { readonly: true, create: false }); } catch { return null; }
     try {

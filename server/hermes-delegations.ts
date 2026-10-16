@@ -6,7 +6,7 @@
 import { Database } from "bun:sqlite";
 
 import type { HerdrPane, OmoTaskResult } from "../shared/protocol.ts";
-import { hermesDbPath } from "./hermes.ts";
+import { HermesStores } from "./hermes-stores.ts";
 
 const BUSY_TIMEOUT_MS = 250;
 /** Hermes ids look like `20261010_001436_0d8605`; anything else is not a session this reads. */
@@ -107,10 +107,13 @@ export function hermesDelegations(path: string, session: string): { running: num
 export class HermesDelegations {
   private readonly sessions = new Map<string, string>();
   private readonly counts = new Map<string, number>();
+  private readonly stores: HermesStores;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   /** `since`: when the newest of them was started, the prompt BackgroundWait counts its limit from */
-  constructor(private readonly deps: { onChange: (paneId: string, running: number, since: number | null) => void; path?: () => string; pollMs?: number }) {}
+  constructor(private readonly deps: { onChange: (paneId: string, running: number, since: number | null) => void; path?: (pane: HerdrPane) => string | Promise<string>; pollMs?: number }) {
+    this.stores = new HermesStores(deps.path);
+  }
 
   start(): void {
     this.timer ??= setInterval(() => this.poll(), this.deps.pollMs ?? 2000);
@@ -127,7 +130,7 @@ export class HermesDelegations {
   }
 
   /** The Hermes panes of a snapshot and the session each runs; a pane that left Hermes counts nothing. */
-  refresh(panes: readonly HerdrPane[]): void {
+  async refresh(panes: readonly HerdrPane[]): Promise<void> {
     const now = new Map(panes.flatMap((pane) => {
       const session = pane.agent === "hermes" ? hermesSessionId(pane) : null;
       return session ? [[pane.pane_id, session] as const] : [];
@@ -135,13 +138,17 @@ export class HermesDelegations {
     for (const paneId of this.sessions.keys()) if (!now.has(paneId)) this.set(paneId, { running: 0, since: null });
     this.sessions.clear();
     for (const [paneId, session] of now) this.sessions.set(paneId, session);
+    const discovery = this.stores.refresh(panes);
+    this.poll();
+    await discovery;
     this.poll();
   }
 
   poll(only?: string): void {
-    const path = (this.deps.path ?? (() => hermesDbPath()))();
     for (const [paneId, session] of this.sessions) {
-      if (only === undefined || only === paneId) this.set(paneId, hermesDelegations(path, session));
+      if (only !== undefined && only !== paneId) continue;
+      const path = this.stores.path(paneId, session);
+      this.set(paneId, path ? hermesDelegations(path, session) : { running: 0, since: null });
     }
   }
 
