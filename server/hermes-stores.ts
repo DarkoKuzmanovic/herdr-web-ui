@@ -19,7 +19,8 @@ export class HermesStores {
     if (!session) { this.panes.delete(pane.pane_id); return; }
     const known = this.panes.get(pane.pane_id);
     if (known?.session === session && Date.now() - known.at < 30_000) return;
-    const entry = { session, path: null as string | null, at: Date.now() };
+    // a re-discovery keeps the known store until the new answer lands: a gap would read as no subagents and release a held finish
+    const entry = { session, path: known?.session === session ? known.path : null, at: Date.now() };
     this.panes.set(pane.pane_id, entry);
     try {
       const resolved = this.resolve ? this.resolve(pane) : hermesTranscriptForPane(pane, pane.cwd ?? "").then((transcript) => transcript.dbPath);
