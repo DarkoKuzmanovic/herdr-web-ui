@@ -13,3 +13,12 @@ Ideas for this fork (Hermes support in herdr-web-ui). Not committed to; pick fro
 - **Hermes background subagents** (done): async `delegate_task` runs from Hermes's `state.db` (`async_delegations`) show as "N background" on the pane and hold its finish alert until they report back (`HermesDelegations` in `server/hermes.ts`). Rows of a dead Hermes are ignored.
 - **Approval and Yes/No cards** (done): Hermes's dangerous-command approval (Allow once / this session / always / Deny) and its own Yes/No confirm (e.g. `/clear`) are cards (`parseHermesApproval`). Answered by arrows, never digits; no notification buttons for approvals. Only seen with `approvals.mode` not `off`.
 - **Clear a stuck state when Hermes dies** (dropped, not needed): tested on herdr 0.9.3, herdr clears the pane's agent and state within a second of Hermes exiting, even after `kill -9`; an interrupted turn and an escaped question both return to idle/done through the existing hooks.
+- **Hermes to-do list as the pane's plan** (done 2026-10-16): Hermes's `todo`/`todo_list` results drive the sidebar's done/total and the plan panel (`server/hermes-plan.ts`); a pruned result is rebuilt from its call (replace or merge by id); cancelled items are left out.
+- **Hermes skill chips** (done 2026-10-16): `skill_view` calls carry their skill (linked files included), and a `/skill` message shows a chip plus only the typed text (`server/hermes-skills.ts`).
+- **Hermes subagent result cards** (done 2026-10-16): a background batch's report-back becomes one `task_result` card per subagent from `async_delegations` (`hermesDelegationResults`); running ones keep the "N background" count.
+- **Each Hermes pane reads its own store** (done 2026-10-16): plan and subagent count resolve the pane's `HERMES_HOME` (`server/hermes-stores.ts`), so profile panes work.
+
+## Ideas
+
+- **Hermes `/goal` on the pane**: goal text, turn N/M, waiting on subagents, verdict (`state_meta` key `goal:<session id>`). Needs a UI spot and three translations.
+- **Session cost and tokens in the chat header** (`sessions.estimated_cost_usd`, token columns). Check open upstream PR #1201 (context ring) first.
